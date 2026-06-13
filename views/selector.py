@@ -1,12 +1,31 @@
+import shutil
 import discord
-import modules.state as state
 
-class TorrentDropdown(discord.ui.Select):
+class TorrentDropdownView(discord.ui.View):
     def __init__(self, request_content, requester, king_user_id, announcements_channel_id):
+        super().__init__(timeout=None)
         self.request_content = request_content
         self.requester = requester
         self.king_user_id = king_user_id
         self.announcements_channel_id = announcements_channel_id
+        
+        # 1. Grab live storage statistics from the root directory
+        total, used, free = shutil.disk_usage("/")
+        
+        # 2. Convert raw bytes cleanly into Gigabytes (1024^3)
+        free_gb = free // (2**30)
+        
+        # 3. Pass the dynamic free_gb value into the dropdown item constructor
+        self.add_item(TorrentDropdown(request_content, requester, king_user_id, announcements_channel_id, free_gb))
+
+
+class TorrentDropdown(discord.ui.Select):
+    def __init__(self, request_content, requester, king_user_id, announcements_channel_id, free_gb):
+        self.request_content = request_content
+        self.requester = requester
+        self.king_user_id = king_user_id
+        self.announcements_channel_id = announcements_channel_id
+        self.free_gb = free_gb
         
         options = [
             discord.SelectOption(
@@ -26,10 +45,9 @@ class TorrentDropdown(discord.ui.Select):
             )
         ]
         
-        # Display the live tracked storage space directly in the placeholder string
-        current_space = state.get_storage_string()
+        # Look here! Your placeholder now injects your laptop's actual remaining space!
         super().__init__(
-            placeholder=f"Select Source ({current_space} Remaining)...", 
+            placeholder=f"Select Source ({free_gb} GB Free on Disk)...", 
             min_values=1, 
             max_values=1, 
             options=options
@@ -49,10 +67,9 @@ class TorrentDropdown(discord.ui.Select):
             )
             return
 
-        # Determine file size dynamically based on selection and modify storage balance
+        # Calculate a mock simulated remaining space line for the final printout
         file_size_gb = 6.0 if "Johnny" in user_choice else 1.4
-        state.subtract_storage(file_size_gb)
-        new_remaining = state.get_storage_string()
+        mock_new_remaining = self.free_gb - file_size_gb
 
         await interaction.response.edit_message(
             content=f"👑 **Source Selected!**\nChosen Payload: `{user_choice}`\nSent over to data central grid.",
@@ -67,10 +84,5 @@ class TorrentDropdown(discord.ui.Select):
                 f"👤 **Request:** {self.request_content} (by {self.requester.mention})\n"
                 f"⏳ **Status:** Initializing download pipeline via qBittorrent...\n"
                 f"⚖️ **Size:** `{file_size_gb} GB`\n"
-                f"💾 **Remaining size on disk:** `{new_remaining}`"
+                f"💾 **Remaining size on disk:** `{mock_new_remaining:.1f} GB`"
             )
-
-class TorrentDropdownView(discord.ui.View):
-    def __init__(self, request_content, requester, king_user_id, announcements_channel_id):
-        super().__init__(timeout=None)
-        self.add_item(TorrentDropdown(request_content, requester, king_user_id, announcements_channel_id))
