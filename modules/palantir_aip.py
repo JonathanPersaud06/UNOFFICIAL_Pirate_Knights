@@ -1,6 +1,7 @@
 import os
 import requests
 import logging
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
@@ -23,9 +24,23 @@ class AIPAgentClient:
         if not self.agent_id:
             logger.warning("PALANTIR_AIP_AGENT_ID is not set. Palantir AIP integration will run in simulated mode.")
 
+        if self.is_configured:
+            logger.info(f"✨ Palantir AIP Client successfully initialized with live Agent ID '{self.agent_id}' on domain '{self.base_url}'.")
+
     @property
     def is_configured(self) -> bool:
         return bool(self.base_url and self.token and self.agent_id)
+
+    def _encode_rid(self, rid: str) -> str:
+        """
+        URL-encodes a Palantir Resource Identifier (RID).
+        Special care is taken to encode dots '.' as '%2E' to prevent web servers, WAFs,
+        and reverse proxies from treating the double dots '..' inside RIDs (e.g., 'ri.aip-agents..agent.')
+        as a directory traversal attempt, which typically results in 404 Not Found or 400 Bad Request.
+        """
+        if not rid:
+            return ""
+        return quote(rid, safe='').replace(".", "%2E")
 
     @property
     def api_path(self) -> str:
@@ -46,7 +61,8 @@ class AIPAgentClient:
             logger.info("Palantir AIP: Running in SIMULATION MODE. Creating mock session ID.")
             return "mock-session-id-12345"
 
-        url = f"{self.base_url}/{self.api_path}/{self.agent_id}/sessions"
+        encoded_agent_id = self._encode_rid(self.agent_id)
+        url = f"{self.base_url}/{self.api_path}/{encoded_agent_id}/sessions"
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
@@ -79,7 +95,9 @@ class AIPAgentClient:
         if not self.is_configured or session_id.startswith("mock-"):
             return self._get_simulated_response(prompt_text)
 
-        url = f"{self.base_url}/{self.api_path}/{self.agent_id}/sessions/{session_id}/prompt"
+        encoded_agent_id = self._encode_rid(self.agent_id)
+        encoded_session_id = self._encode_rid(session_id)
+        url = f"{self.base_url}/{self.api_path}/{encoded_agent_id}/sessions/{encoded_session_id}/prompt"
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
