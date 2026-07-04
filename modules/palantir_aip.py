@@ -42,6 +42,19 @@ class AIPAgentClient:
             return ""
         return quote(rid, safe='').replace(".", "%2E")
 
+    def _send_request(self, method: str, url: str, headers: dict, json_data: dict = None, timeout: int = 15) -> requests.Response:
+        """
+        Sends an HTTP request with the exact URL provided, bypassing python-requests'
+        automatic path normalization. This ensures that percent-encoded characters like
+        %2E (for '.') are preserved over the wire and not unquoted/collapsed.
+        """
+        session = requests.Session()
+        req = requests.Request(method, url, headers=headers, json=json_data)
+        prepared = session.prepare_request(req)
+        # Force the PreparedRequest to use our exact encoded URL, bypassing urllib/requests normalization
+        prepared.url = url
+        return session.send(prepared, timeout=timeout)
+
     @property
     def api_path(self) -> str:
         """
@@ -71,7 +84,7 @@ class AIPAgentClient:
         try:
             logger.info(f"Palantir AIP: Creating session at {url}")
             # Foundry API expects a POST request with an empty JSON object
-            response = requests.post(url, headers=headers, json={}, timeout=15)
+            response = self._send_request("POST", url, headers=headers, json_data={}, timeout=15)
             response.raise_for_status()
             
             data = response.json()
@@ -111,7 +124,7 @@ class AIPAgentClient:
 
         try:
             logger.info(f"Palantir AIP: Prompting session '{session_id}' with text: '{prompt_text}'")
-            response = requests.post(url, headers=headers, json=payload, timeout=30)
+            response = self._send_request("POST", url, headers=headers, json_data=payload, timeout=30)
             response.raise_for_status()
             
             data = response.json()
