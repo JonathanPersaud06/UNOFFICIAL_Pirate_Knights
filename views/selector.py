@@ -8,10 +8,135 @@ import logging
 
 logger = logging.getLogger("pirate_knights.selector")
 
+def clean_title_for_comparison(t: str) -> str:
+    """
+    Lowercases, removes non-alphanumeric characters, and strips whitespace.
+    This creates a reliable string to compare titles without worrying about
+    accents, brackets, spaces, dots, or special symbols.
+    """
+    return re.sub(r"[^a-z0-9]", "", t.lower())
+
+def extract_season_and_episode(title: str) -> str:
+    """
+    Attempts to parse season and episode information from a torrent release title.
+    Falls back to S01E01 if none is found.
+    """
+    # 1. Look for SxxExx
+    m = re.search(r"S(\d+)E(\d+)", title, re.IGNORECASE)
+    if m:
+        return f"S{int(m.group(1)):02d}E{int(m.group(2)):02d}"
+    
+    # 2. Look for Season x Episode y
+    m_season = re.search(r"S(?:eason)?\s*(\d+)", title, re.IGNORECASE)
+    season = int(m_season.group(1)) if m_season else 1
+    
+    m_ep = re.search(r"[Ee](?:pisode|p)?\s*(\d+)", title, re.IGNORECASE)
+    if m_ep:
+        return f"S{season:02d}E{int(m_ep.group(1)):02d}"
+    
+    # 3. Look for standalone absolute episode number (e.g. - 05)
+    m_abs = re.search(r"\b(?:-|episode|ep)?\s*(\d{1,3})\b", title, re.IGNORECASE)
+    if m_abs:
+        val = m_abs.group(1)
+        # Avoid matching resolution numbers or current years
+        if val not in ["1080", "720", "2160", "480", "1999", "2000", "2001", "2002", "2003", "2004", "2005", "2006", "2024", "2025", "2026"]:
+            return f"S{season:02d}E{int(val):02d}"
+            
+    return f"S{season:02d}E01"
+
+def get_sonarr_series() -> list:
+    """
+    Fetches the full list of series added in Sonarr.
+    """
+    sonarr_url = os.getenv("SONARR_URL")
+    sonarr_api_key = os.getenv("SONARR_API_KEY")
+    if not sonarr_url or not sonarr_api_key:
+        return []
+    s_url = sonarr_url.strip().rstrip("/")
+    try:
+        r = requests.get(
+            f"{s_url}/api/v3/series",
+            headers={"X-Api-Key": sonarr_api_key.strip()},
+            timeout=8
+        )
+        if r.status_code == 200:
+            return r.json()
+    except Exception as e:
+        logger.error(f"Error fetching Sonarr series list: {e}")
+    return []
+
+def get_radarr_movies() -> list:
+    """
+    Fetches the full list of movies added in Radarr.
+    """
+    radarr_url = os.getenv("RADARR_URL")
+    radarr_api_key = os.getenv("RADARR_API_KEY")
+    if not radarr_url or not radarr_api_key:
+        return []
+    r_url = radarr_url.strip().rstrip("/")
+    try:
+        r = requests.get(
+            f"{r_url}/api/v3/movie",
+            headers={"X-Api-Key": radarr_api_key.strip()},
+            timeout=8
+        )
+        if r.status_code == 200:
+            return r.json()
+    except Exception as e:
+        logger.error(f"Error fetching Radarr movies list: {e}")
+    return []
+
+def find_matching_sonarr_series(release_title: str, series_list: list) -> dict:
+    """
+    Matches the release title against Sonarr's library series names and alternate titles.
+    """
+    cleaned_release = clean_title_for_comparison(release_title)
+    # Match longest titles first to prevent greedy partial matching (e.g. "Azumanga Daioh" before "Azumanga")
+    sorted_series = sorted(series_list, key=lambda x: len(x.get("title", "")), reverse=True)
+    
+    for s in sorted_series:
+        titles_to_check = [s.get("title", "")]
+        for alt in s.get("alternateTitles", []):
+            if isinstance(alt, dict) and alt.get("title"):
+                titles_to_check.append(alt.get("title"))
+        
+        for t in titles_to_check:
+            if not t:
+                continue
+            cleaned_s = clean_title_for_comparison(t)
+            if cleaned_s and cleaned_s in cleaned_release:
+                return s
+    return None
+
+def find_matching_radarr_movie(release_title: str, movies_list: list) -> dict:
+    """
+    Matches the release title against Radarr's library movie names and alternate titles.
+    """
+    cleaned_release = clean_title_for_comparison(release_title)
+    sorted_movies = sorted(movies_list, key=lambda x: len(x.get("title", "")), reverse=True)
+    
+    for m in sorted_movies:
+        titles_to_check = [m.get("title", ""), m.get("originalTitle", "")]
+        for alt in m.get("alternateTitles", []):
+            if isinstance(alt, dict) and alt.get("title"):
+                titles_to_check.append(alt.get("title"))
+                
+        for t in titles_to_check:
+            if not t:
+                continue
+            cleaned_m = clean_title_for_comparison(t)
+            if cleaned_m and cleaned_m in cleaned_release:
+                return m
+    return None
+
 def push_release(title: str, download_url: str) -> dict:
     """
     Pushes a torrent release to Sonarr and Radarr via their /api/v3/release/push endpoint.
     This instructs them to parse, match, and download the item automatically.
+    
+    To bypass the "Unknown Series" / "Unknown Movie" parsing issues, we pre-query
+    the local library to match the item. If matched, we push a beautifully formatted,
+    perfectly parseable release title while keeping the original downloadUrl.
     """
     sonarr_url = os.getenv("SONARR_URL")
     sonarr_api_key = os.getenv("SONARR_API_KEY")
@@ -19,18 +144,33 @@ def push_release(title: str, download_url: str) -> dict:
     radarr_api_key = os.getenv("RADARR_API_KEY")
     
     results = {}
-    payload = {
-        "title": title,
-        "downloadUrl": download_url,
-        "protocol": "torrent",
-        "publishDate": datetime.utcnow().isoformat() + "Z",
-        "indexer": "Fairy_Bit_Bot_Prowlarr"
-    }
     
+    # --- Sonarr Push ---
     if sonarr_url and sonarr_api_key:
         s_url = sonarr_url.strip().rstrip("/")
+        # Try to pre-match against series in library
+        series_list = get_sonarr_series()
+        matched_series = find_matching_sonarr_series(title, series_list)
+        
+        pushed_title = title
+        if matched_series:
+            series_title = matched_series.get("title")
+            ep_info = extract_season_and_episode(title)
+            pushed_title = f"{series_title} - {ep_info}"
+            logger.info(f"Pre-matched to Sonarr library: '{series_title}'. Normalizing push title to: '{pushed_title}'")
+        else:
+            logger.warning(f"Could not pre-match '{title}' in Sonarr library. Falling back to original title.")
+            
+        payload = {
+            "title": pushed_title,
+            "downloadUrl": download_url,
+            "protocol": "torrent",
+            "publishDate": datetime.utcnow().isoformat() + "Z",
+            "indexer": "Fairy_Bit_Bot_Prowlarr"
+        }
+        
         try:
-            logger.info(f"Pushing release to Sonarr: {title}")
+            logger.info(f"Pushing release to Sonarr: {pushed_title}")
             r = requests.post(
                 f"{s_url}/api/v3/release/push", 
                 headers={"X-Api-Key": sonarr_api_key.strip()}, 
@@ -59,10 +199,35 @@ def push_release(title: str, download_url: str) -> dict:
             results["sonarr"] = f"Error: {e}"
             logger.error(f"Error pushing to Sonarr: {e}")
             
+    # --- Radarr Push ---
     if radarr_url and radarr_api_key:
         r_url = radarr_url.strip().rstrip("/")
+        # Try to pre-match against movies in library
+        movies_list = get_radarr_movies()
+        matched_movie = find_matching_radarr_movie(title, movies_list)
+        
+        pushed_title = title
+        if matched_movie:
+            movie_title = matched_movie.get("title")
+            movie_year = matched_movie.get("year")
+            if movie_year:
+                pushed_title = f"{movie_title} ({movie_year})"
+            else:
+                pushed_title = movie_title
+            logger.info(f"Pre-matched to Radarr library: '{movie_title}'. Normalizing push title to: '{pushed_title}'")
+        else:
+            logger.warning(f"Could not pre-match '{title}' in Radarr library. Falling back to original title.")
+            
+        payload = {
+            "title": pushed_title,
+            "downloadUrl": download_url,
+            "protocol": "torrent",
+            "publishDate": datetime.utcnow().isoformat() + "Z",
+            "indexer": "Fairy_Bit_Bot_Prowlarr"
+        }
+        
         try:
-            logger.info(f"Pushing release to Radarr: {title}")
+            logger.info(f"Pushing release to Radarr: {pushed_title}")
             r = requests.post(
                 f"{r_url}/api/v3/release/push", 
                 headers={"X-Api-Key": radarr_api_key.strip()}, 
