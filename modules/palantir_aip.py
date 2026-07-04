@@ -27,6 +27,16 @@ class AIPAgentClient:
     def is_configured(self) -> bool:
         return bool(self.base_url and self.token and self.agent_id)
 
+    @property
+    def api_path(self) -> str:
+        """
+        Dynamically determine the API base path based on the Agent/Chatbot ID (RID) format.
+        Older instances of Foundry use 'aip-agents/agents', newer ones use 'aip-chatbots/chatbots'.
+        """
+        if self.agent_id and "aip-chatbots" in self.agent_id:
+            return "api/v1/aip-chatbots/chatbots"
+        return "api/v1/aip-agents/agents"
+
     def create_session(self) -> str:
         """
         Creates a new interactive session with the AIP Agent.
@@ -36,7 +46,7 @@ class AIPAgentClient:
             logger.info("Palantir AIP: Running in SIMULATION MODE. Creating mock session ID.")
             return "mock-session-id-12345"
 
-        url = f"{self.base_url}/api/v1/aip-agents/agents/{self.agent_id}/sessions"
+        url = f"{self.base_url}/{self.api_path}/{self.agent_id}/sessions"
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
@@ -69,7 +79,7 @@ class AIPAgentClient:
         if not self.is_configured or session_id.startswith("mock-"):
             return self._get_simulated_response(prompt_text)
 
-        url = f"{self.base_url}/api/v1/aip-agents/agents/{self.agent_id}/sessions/{session_id}/prompt"
+        url = f"{self.base_url}/{self.api_path}/{self.agent_id}/sessions/{session_id}/prompt"
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
