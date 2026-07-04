@@ -37,13 +37,12 @@ class AIPAgentClient:
     def _encode_rid(self, rid: str) -> str:
         """
         URL-encodes a Palantir Resource Identifier (RID).
-        Special care is taken to encode dots '.' as '%2E' to prevent web servers, WAFs,
-        and reverse proxies from treating the double dots '..' inside RIDs (e.g., 'ri.aip-agents..agent.')
-        as a directory traversal attempt, which typically results in 404 Not Found or 400 Bad Request.
+        We keep dots '.' unencoded because modern Palantir gateways and reverse proxies
+        (like Envoy) reject '%2E' in paths as invalid, resulting in a 400 Bad Request.
         """
         if not rid:
             return ""
-        return quote(rid, safe='').replace(".", "%2E")
+        return quote(rid, safe='.')
 
     def _send_request(self, method: str, url: str, headers: dict, json_data: dict = None, timeout: int = 15) -> requests.Response:
         """
@@ -130,8 +129,8 @@ class AIPAgentClient:
                     
                     # Any response status that is NOT a 404 (or 405 Method Not Allowed/502/503/504 etc.)
                     # indicates that the routing resolved to an actual handler on the backend.
-                    # Especially 200, 201, 400, 401, 403.
-                    if status in [200, 201, 400, 401, 403]:
+                    # Especially 200, 201, 401, 403.
+                    if status in [200, 201, 401, 403]:
                         logger.info(f"Discovered valid endpoint path '{candidate}' with use_encoding={use_enc} (HTTP {status})")
                         self._discovered_api_path = candidate
                         self._use_encoding = use_enc
