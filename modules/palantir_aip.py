@@ -74,6 +74,7 @@ class AIPAgentClient:
         if self.agent_id and "aip-chatbots" in self.agent_id:
             return "api/v1/aip-chatbots/chatbots"
         
+        # Default to chatbot as per the user's discovery that despite being ri.aip-agents..agent... it is a chatbot!
         return "api/v1/aip-chatbots/chatbots"
 
     def _discover_endpoint(self) -> tuple[str, bool]:
@@ -89,52 +90,49 @@ class AIPAgentClient:
 
         # Core namespaces used by Palantir across different versions of Foundry / AIP
         candidates = [
-            "api/v2/aipAgents/agents",
-            "api/v2/aipChatbots/chatbots",
-            "api/v1/aip-agents/agents",
             "api/v1/aip-chatbots/chatbots",
+            "api/v1/aip-agents/agents",
+            "api/v2/aipChatbots/chatbots",
+            "api/v2/aipAgents/agents",
             "api/v1/aip/chatbots",
-            "api/v1/aip/agents"
+            "api/v1/aip/agents",
+            "api/v2/aip/chatbots",
+            "api/v2/aip/agents",
+            "api/v1/chatbots",
+            "api/v1/agents",
+            "api/v2/chatbots",
+            "api/v2/agents",
+            "api/v1/aip-agents",
+            "api/v1/aip-chatbots",
+            "api/v2/aipAgents",
+            "api/v2/aipChatbots"
         ]
 
         headers = {
             "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json",
-            "Accept": "application/json"
-        }
-
-        # Baseline payload required for validating execution
-        probe_payload = {
-            "session": {
-                "parameters": {}
-            }
+            "Content-Type": "application/json"
         }
 
         # Let's test each candidate endpoint
         for candidate in candidates:
+            # Test with and without percent-encoded RID
             for use_enc in [True, False]:
                 agent_id_str = self._encode_rid(self.agent_id) if use_enc else self.agent_id
-                
-                # If checking a v2 endpoint, we must append preview flag to get accurate status codes
                 url = f"{self.base_url}/{candidate}/{agent_id_str}/sessions"
-                if "v2" in candidate:
-                    url += "?preview=true"
                 
                 try:
                     logger.debug(f"Probing: Path={candidate}, Encoded={use_enc} at URL={url}")
-                    response = self._send_request("POST", url, headers=headers, json_data=probe_payload, timeout=5)
+                    # We send a lightweight session POST. Even if it fails with 401/403/400,
+                    # if the status is NOT 404, the path is VALID and exists on the server!
+                    response = self._send_request("POST", url, headers=headers, json_data={}, timeout=5)
                     status = response.status_code
                     logger.info(f"Probe Result for {candidate} (Encoded={use_enc}): HTTP {status}")
                     
-                    # 200/201 mean success, 400 with a payload on v2 means it hit the actual business logic layer
-                    if status in:
-                        logger.info(f"Discovered valid operational endpoint path '{candidate}' with use_encoding={use_enc} (HTTP {status})")
-                        self._discovered_api_path = candidate
-                        self._use_encoding = use_enc
-                        return candidate, use_enc
-                        
-                    elif status in [400, 401, 403] and "v2" in candidate:
-                        logger.info(f"Discovered valid route boundary '{candidate}' with use_encoding={use_enc} (HTTP {status})")
+                    # Any response status that is NOT a 404 (or 405 Method Not Allowed/502/503/504 etc.)
+                    # indicates that the routing resolved to an actual handler on the backend.
+                    # Especially 200, 201, 400, 401, 403.
+                    if status in [200, 201, 400, 401, 403]:
+                        logger.info(f"Discovered valid endpoint path '{candidate}' with use_encoding={use_enc} (HTTP {status})")
                         self._discovered_api_path = candidate
                         self._use_encoding = use_enc
                         return candidate, use_enc
@@ -142,7 +140,18 @@ class AIPAgentClient:
                     logger.debug(f"Probe error for {candidate} (Encoded={use_enc}): {e}")
 
         # Default fallback if nothing succeeded
-        fallback_path = "api/v2/aipAgents/agents"
+        fallback_path = "api/v1/aip-chatbots/chatbots"
+        aip_type = os.getenv("PALANTIR_AIP_TYPE", "chatbot").strip().lower()
+        if aip_type == "agent":
+            fallback_path = "api/v1/aip-agents/agents"
+        elif aip_type == "chatbot":
+            fallback_path = "api/v1/aip-chatbots/chatbots"
+        elif self.agent_id and "aip-chatbots" in self.agent_id:
+            fallback_path = "api/v1/aip-chatbots/chatbots"
+        elif self.agent_id and "aip-agents" in self.agent_id:
+            # Although ID has "aip-agents", user clarified it is a chatbot!
+            fallback_path = "api/v1/aip-chatbots/chatbots"
+        
         logger.warning(f"⚠️ Endpoint discovery could not identify a valid path. Falling back to default: '{fallback_path}' with encoding=True")
         self._discovered_api_path = fallback_path
         self._use_encoding = True
@@ -160,44 +169,73 @@ class AIPAgentClient:
 
         # Auto-discover correct endpoint path and encoding scheme
         api_path, use_encoding = self._discover_endpoint()
+
         agent_id_str = self._encode_rid(self.agent_id) if use_encoding else self.agent_id
-
-        # 1. Format URL endpoint string target
         url = f"{self.base_url}/{api_path}/{agent_id_str}/sessions"
-        if "v2" in api_path:
-            url += "?preview=true"
-
-        # 2. Build explicit baseline session parameters configuration mapping payload
-        payload = {
-            "session": {
-                "parameters": {}
-            }
-        }
-
-        # 3. Complete header configuration mapping definitions
         headers = {
             "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json",
-            "Accept": "application/json"
+            "Content-Type": "application/json"
         }
 
         logger.info(f"Palantir AIP: Creating session at {url}")
+        # Foundry API expects a POST request with an empty JSON object
+        response = self._send_request("POST", url, headers=headers, json_data={}, timeout=15)
+        response.raise_for_status()
         
-        # Execute the HTTP POST request passing down our JSON body
-        response = self._send_request("POST", url, headers=headers, json_data=payload)
+        data = response.json()
+        # The session ID/RID is typically under "id" or "sessionId"
+        session_id = data.get("id") or data.get("sessionId")
+        if not session_id:
+            raise KeyError(f"Response did not contain 'id' or 'sessionId'. Keys present: {list(data.keys())}")
         
-        if response.status_code not in:
-            logger.error(f"Failed to create session. Server response: {response.text}")
-            response.raise_for_status()
+        logger.info(f"Palantir AIP: Successfully created live session '{session_id}'")
+        return session_id
 
+    def prompt_agent(self, session_id: str, prompt_text: str) -> str:
+        """
+        Sends a natural language prompt to the agent inside an active session.
+        Returns the agent's textual response.
+        """
+        if not self.is_configured:
+            raise ValueError("Palantir AIP is not configured.")
+
+        # Auto-discover correct endpoint path and encoding scheme
+        api_path, use_encoding = self._discover_endpoint()
+
+        agent_id_str = self._encode_rid(self.agent_id) if use_encoding else self.agent_id
+        session_id_str = self._encode_rid(session_id) if use_encoding else session_id
+        url = f"{self.base_url}/{api_path}/{agent_id_str}/sessions/{session_id_str}/prompt"
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json"
+        }
+        
+        # Standard AIP Agent Studio prompt payload schema
+        payload = {
+            "parameterValues": {},
+            "prompt": prompt_text
+        }
+
+        logger.info(f"Palantir AIP: Prompting session '{session_id}' with text: '{prompt_text}'")
+        response = self._send_request("POST", url, headers=headers, json_data=payload, timeout=30)
+        response.raise_for_status()
+        
         data = response.json()
         
-        # Palantir API typically returns session details within an 'id' or 'rid' field
-        session_id = data.get("id") or data.get("rid") or data.get("session", {}).get("id")
-        if not session_id:
-            logger.warning(f"Session created but couldn't parse ID from payload response structure: {data}")
-            # Fallback to returning raw data payload string if map structural fields are absent
-            return str(data)
-            
-        logger.info(f"Successfully generated new live Palantir AIP Session: {session_id}")
-        return session_id
+        # The textual response is typically nested under response -> text
+        # e.g., { "response": { "text": "I created the request..." } }
+        text_response = ""
+        if "response" in data:
+            res_obj = data["response"]
+            if isinstance(res_obj, dict):
+                text_response = res_obj.get("text", "")
+            else:
+                text_response = str(res_obj)
+        elif "message" in data:
+            text_response = data["message"].get("text", "")
+        else:
+            # Try common fallback keys
+            text_response = data.get("text") or data.get("value") or str(data)
+
+        logger.info("Palantir AIP: Received response from agent successfully.")
+        return text_response
