@@ -16,6 +16,9 @@ class AIPAgentClient:
         self.token = (token or os.getenv("PALANTIR_AIP_TOKEN") or "").strip()
         self.agent_id = (agent_id or os.getenv("PALANTIR_AIP_AGENT_ID") or os.getenv("AGENT_ID") or "").strip()
 
+        self._discovered_api_path = None
+        self._use_encoding = True
+
         # Simple verification
         if not self.base_url:
             logger.warning("PALANTIR_AIP_URL is not set. Palantir AIP integration will run in simulated mode.")
@@ -65,6 +68,78 @@ class AIPAgentClient:
             return "api/v1/aip-chatbots/chatbots"
         return "api/v1/aip-agents/agents"
 
+    def _discover_endpoint(self) -> tuple[str, bool]:
+        """
+        Proactively probes and discovers the correct API path and RID encoding scheme
+        by trying common Palantir API paths and checking their response codes.
+        Returns a tuple of (discovered_path, use_encoding).
+        """
+        if self._discovered_api_path is not None:
+            return self._discovered_api_path, self._use_encoding
+
+        logger.info("🔮 Palantir AIP: Starting self-healing API endpoint auto-discovery...")
+
+        # Core namespaces used by Palantir across different versions of Foundry / AIP
+        candidates = [
+            "api/v1/aip-chatbots/chatbots",
+            "api/v1/aip-agents/agents",
+            "api/v2/aipChatbots/chatbots",
+            "api/v2/aipAgents/agents",
+            "api/v1/aip/chatbots",
+            "api/v1/aip/agents",
+            "api/v2/aip/chatbots",
+            "api/v2/aip/agents",
+            "api/v1/chatbots",
+            "api/v1/agents",
+            "api/v2/chatbots",
+            "api/v2/agents",
+            "api/v1/aip-agents",
+            "api/v1/aip-chatbots",
+            "api/v2/aipAgents",
+            "api/v2/aipChatbots"
+        ]
+
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json"
+        }
+
+        # Let's test each candidate endpoint
+        for candidate in candidates:
+            # Test with and without percent-encoded RID
+            for use_enc in [True, False]:
+                agent_id_str = self._encode_rid(self.agent_id) if use_enc else self.agent_id
+                url = f"{self.base_url}/{candidate}/{agent_id_str}/sessions"
+                
+                try:
+                    logger.debug(f"Probing: Path={candidate}, Encoded={use_enc} at URL={url}")
+                    # We send a lightweight session POST. Even if it fails with 401/403/400,
+                    # if the status is NOT 404, the path is VALID and exists on the server!
+                    response = self._send_request("POST", url, headers=headers, json_data={}, timeout=5)
+                    status = response.status_code
+                    logger.info(f"Probe Result for {candidate} (Encoded={use_enc}): HTTP {status}")
+                    
+                    # Any response status that is NOT a 404 (or 405 Method Not Allowed/502/503/504 etc.)
+                    # indicates that the routing resolved to an actual handler on the backend.
+                    # Especially 200, 201, 400, 401, 403.
+                    if status in [200, 201, 400, 401, 403]:
+                        logger.info(f"Discovered valid endpoint path '{candidate}' with use_encoding={use_enc} (HTTP {status})")
+                        self._discovered_api_path = candidate
+                        self._use_encoding = use_enc
+                        return candidate, use_enc
+                except Exception as e:
+                    logger.debug(f"Probe error for {candidate} (Encoded={use_enc}): {e}")
+
+        # Default fallback if nothing succeeded
+        fallback_path = "api/v1/aip-agents/agents"
+        if self.agent_id and "aip-chatbots" in self.agent_id:
+            fallback_path = "api/v1/aip-chatbots/chatbots"
+        
+        logger.warning(f"⚠️ Endpoint discovery could not identify a valid path. Falling back to default: '{fallback_path}' with encoding=True")
+        self._discovered_api_path = fallback_path
+        self._use_encoding = True
+        return fallback_path, True
+
     def create_session(self) -> str:
         """
         Creates a new interactive session with the AIP Agent.
@@ -74,8 +149,11 @@ class AIPAgentClient:
             logger.info("Palantir AIP: Running in SIMULATION MODE. Creating mock session ID.")
             return "mock-session-id-12345"
 
-        encoded_agent_id = self._encode_rid(self.agent_id)
-        url = f"{self.base_url}/{self.api_path}/{encoded_agent_id}/sessions"
+        # Auto-discover correct endpoint path and encoding scheme
+        api_path, use_encoding = self._discover_endpoint()
+
+        agent_id_str = self._encode_rid(self.agent_id) if use_encoding else self.agent_id
+        url = f"{self.base_url}/{api_path}/{agent_id_str}/sessions"
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
@@ -108,9 +186,12 @@ class AIPAgentClient:
         if not self.is_configured or session_id.startswith("mock-"):
             return self._get_simulated_response(prompt_text)
 
-        encoded_agent_id = self._encode_rid(self.agent_id)
-        encoded_session_id = self._encode_rid(session_id)
-        url = f"{self.base_url}/{self.api_path}/{encoded_agent_id}/sessions/{encoded_session_id}/prompt"
+        # Auto-discover correct endpoint path and encoding scheme
+        api_path, use_encoding = self._discover_endpoint()
+
+        agent_id_str = self._encode_rid(self.agent_id) if use_encoding else self.agent_id
+        session_id_str = self._encode_rid(session_id) if use_encoding else session_id
+        url = f"{self.base_url}/{api_path}/{agent_id_str}/sessions/{session_id_str}/prompt"
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
