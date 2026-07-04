@@ -37,7 +37,24 @@ def push_release(title: str, download_url: str) -> dict:
                 json=payload, 
                 timeout=12
             )
-            results["sonarr"] = f"Success ({r.status_code})" if r.status_code in [200, 201] else f"Failed ({r.status_code}): {r.text[:100]}"
+            if r.status_code in [200, 201]:
+                try:
+                    resp_json = r.json()
+                    data = resp_json[0] if isinstance(resp_json, list) else resp_json
+                    if isinstance(data, dict):
+                        approved = data.get("approved", True)
+                        rejections = data.get("rejections", [])
+                        if approved and not rejections:
+                            results["sonarr"] = "Success (Grabbed/Approved) ✅"
+                        else:
+                            rej_msg = ", ".join(rejections) if rejections else "Rejected (e.g. series unmonitored or not in library)"
+                            results["sonarr"] = f"Rejected ⚠️ ({rej_msg})"
+                    else:
+                        results["sonarr"] = "Success (200)"
+                except Exception as ex:
+                    results["sonarr"] = f"Success ({r.status_code}) but response unparsed: {ex}"
+            else:
+                results["sonarr"] = f"Failed ({r.status_code}): {r.text[:100]}"
         except Exception as e:
             results["sonarr"] = f"Error: {e}"
             logger.error(f"Error pushing to Sonarr: {e}")
@@ -52,12 +69,53 @@ def push_release(title: str, download_url: str) -> dict:
                 json=payload, 
                 timeout=12
             )
-            results["radarr"] = f"Success ({r.status_code})" if r.status_code in [200, 201] else f"Failed ({r.status_code}): {r.text[:100]}"
+            if r.status_code in [200, 201]:
+                try:
+                    resp_json = r.json()
+                    data = resp_json[0] if isinstance(resp_json, list) else resp_json
+                    if isinstance(data, dict):
+                        approved = data.get("approved", True)
+                        rejections = data.get("rejections", [])
+                        if approved and not rejections:
+                            results["radarr"] = "Success (Grabbed/Approved) ✅"
+                        else:
+                            rej_msg = ", ".join(rejections) if rejections else "Rejected (e.g. movie not in library or unmonitored)"
+                            results["radarr"] = f"Rejected ⚠️ ({rej_msg})"
+                    else:
+                        results["radarr"] = "Success (200)"
+                except Exception as ex:
+                    results["radarr"] = f"Success ({r.status_code}) but response unparsed: {ex}"
+            else:
+                results["radarr"] = f"Failed ({r.status_code}): {r.text[:100]}"
         except Exception as e:
             results["radarr"] = f"Error: {e}"
             logger.error(f"Error pushing to Radarr: {e}")
             
     return results
+
+def scrape_nyaa_title(nyaa_id: str) -> str:
+    """
+    Fetches the Nyaa.si view page for the given ID and extracts the actual
+    torrent title from the <title> HTML tag.
+    """
+    try:
+        url = f"https://nyaa.si/view/{nyaa_id}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36"
+        }
+        logger.info(f"Fetching Nyaa.si view page to scrape release title for ID: {nyaa_id}")
+        r = requests.get(url, headers=headers, timeout=6)
+        if r.status_code == 200:
+            m = re.search(r"<title>(.*?)</title>", r.text, re.IGNORECASE | re.DOTALL)
+            if m:
+                raw_title = m.group(1).strip()
+                if raw_title.endswith(" :: Nyaa"):
+                    raw_title = raw_title[:-8].strip()
+                logger.info(f"Successfully scraped Nyaa title: {raw_title}")
+                return raw_title
+    except Exception as e:
+        logger.error(f"Error scraping Nyaa title: {e}")
+    return f"Nyaa Torrent [ID: {nyaa_id}]"
 
 class TorrentDropdownView(discord.ui.View):
     def __init__(self, request_content, requester, king_user_id, announcements_channel_id):
@@ -89,13 +147,15 @@ class TorrentDropdown(discord.ui.Select):
         # 1. Check if the request contains a direct link (like nyaa.si)
         direct_url = None
         direct_title = "Direct Torrent Link"
+        scraped_title = None
         
         # Match Nyaa.si view page
         nyaa_match = re.search(r"https?://(www\.)?nyaa\.si/view/(\d+)", request_content)
         if nyaa_match:
             nyaa_id = nyaa_match.group(2)
             direct_url = f"https://nyaa.si/download/{nyaa_id}.torrent"
-            direct_title = f"Nyaa Torrent [ID: {nyaa_id}]"
+            scraped_title = scrape_nyaa_title(nyaa_id)
+            direct_title = scraped_title
         elif "magnet:?" in request_content:
             direct_url = request_content
             # Try to get dn (display name) from magnet link
@@ -135,7 +195,9 @@ class TorrentDropdown(discord.ui.Select):
             # Determine search query keyword
             search_query = request_content
             if request_content.startswith("http"):
-                if "dn=" in request_content:
+                if scraped_title:
+                    search_query = scraped_title
+                elif "dn=" in request_content:
                     dn_match = re.search(r"dn=([^&]+)", request_content)
                     if dn_match:
                         import urllib.parse
