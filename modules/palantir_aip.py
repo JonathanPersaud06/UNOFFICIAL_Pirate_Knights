@@ -63,10 +63,19 @@ class AIPAgentClient:
         """
         Dynamically determine the API base path based on the Agent/Chatbot ID (RID) format.
         Older instances of Foundry use 'aip-agents/agents', newer ones use 'aip-chatbots/chatbots'.
+        Can be overridden with PALANTIR_AIP_TYPE env var ('chatbot' or 'agent').
         """
+        aip_type = os.getenv("PALANTIR_AIP_TYPE", "chatbot").strip().lower()
+        if aip_type == "agent":
+            return "api/v1/aip-agents/agents"
+        elif aip_type == "chatbot":
+            return "api/v1/aip-chatbots/chatbots"
+
         if self.agent_id and "aip-chatbots" in self.agent_id:
             return "api/v1/aip-chatbots/chatbots"
-        return "api/v1/aip-agents/agents"
+        
+        # Default to chatbot as per the user's discovery that despite being ri.aip-agents..agent... it is a chatbot!
+        return "api/v1/aip-chatbots/chatbots"
 
     def _discover_endpoint(self) -> tuple[str, bool]:
         """
@@ -131,8 +140,16 @@ class AIPAgentClient:
                     logger.debug(f"Probe error for {candidate} (Encoded={use_enc}): {e}")
 
         # Default fallback if nothing succeeded
-        fallback_path = "api/v1/aip-agents/agents"
-        if self.agent_id and "aip-chatbots" in self.agent_id:
+        fallback_path = "api/v1/aip-chatbots/chatbots"
+        aip_type = os.getenv("PALANTIR_AIP_TYPE", "chatbot").strip().lower()
+        if aip_type == "agent":
+            fallback_path = "api/v1/aip-agents/agents"
+        elif aip_type == "chatbot":
+            fallback_path = "api/v1/aip-chatbots/chatbots"
+        elif self.agent_id and "aip-chatbots" in self.agent_id:
+            fallback_path = "api/v1/aip-chatbots/chatbots"
+        elif self.agent_id and "aip-agents" in self.agent_id:
+            # Although ID has "aip-agents", user clarified it is a chatbot!
             fallback_path = "api/v1/aip-chatbots/chatbots"
         
         logger.warning(f"⚠️ Endpoint discovery could not identify a valid path. Falling back to default: '{fallback_path}' with encoding=True")
