@@ -79,23 +79,56 @@ async def on_message(message):
             await message.channel.send("🌾 Ahoy Peasant! Mention me along with what you want to download (e.g., `@Bot Download Bleach 1080p`).")
             return
 
-        # 1. Inform the peasant that the request is being analyzed by our AI Orchestrator
-        status_msg = await message.channel.send(
-            f"🌾 **Your request received, peasant!** `{request_text}`\n"
-            f"🔮 *Analyzing disk quota, system parameters, and recording in Palantir AIP Ontology...*"
+        # 1. Check if the request contains a direct link to bypass AIP completely
+        is_direct = (
+            "magnet:?" in request_text or 
+            "nyaa.si/view/" in request_text or 
+            request_text.endswith(".torrent") or
+            ("download" in request_text.lower() and "http" in request_text)
         )
 
+        if is_direct:
+            status_msg = await message.channel.send(
+                f"🌾 **Direct payload link received, peasant!** `{request_text[:80]}...`\n"
+                f"🔗 *Bypassing AIP Orchestrator and queuing direct payload for High King's approval...*"
+            )
+        else:
+            status_msg = await message.channel.send(
+                f"🌾 **Your request received, peasant!** `{request_text}`\n"
+                f"🔮 *Analyzing disk quota, system parameters, and recording in Palantir AIP Ontology...*"
+            )
+
         try:
-            # 2. Spin up a new session with our Palantir AIP Orchestrator
-            logger.info("Main: Creating Palantir AIP session...")
-            session_id = aip_client.create_session()
-            
-            # 3. Prompt the agent to evaluate the request and trigger our action
-            logger.info(f"Main: Prompting AIP with peasant request: '{request_text}'")
-            # We add context so the agent knows who requested it and where
-            full_prompt = f"Peasant '{message.author.name}' requested: '{request_text}'."
-            aip_evaluation = aip_client.prompt_agent(session_id, full_prompt)
-            
+            session_id = None
+            aip_evaluation = ""
+
+            if is_direct:
+                logger.info("Direct link detected in peasant request. Bypassing Palantir AIP evaluation.")
+                aip_evaluation = (
+                    "🔗 **Direct Torrent/Magnet Link Payload**\n"
+                    "This request contains a direct magnet or torrent link. Palantir AIP analysis was "
+                    "bypassed to route the direct source straight to the Servarr push engine."
+                )
+            else:
+                try:
+                    # 2. Spin up a new session with our Palantir AIP Orchestrator
+                    logger.info("Main: Creating Palantir AIP session...")
+                    session_id = aip_client.create_session()
+                    
+                    # 3. Prompt the agent to evaluate the request and trigger our action
+                    logger.info(f"Main: Prompting AIP with peasant request: '{request_text}'")
+                    # We add context so the agent knows who requested it and where
+                    full_prompt = f"Peasant '{message.author.name}' requested: '{request_text}'."
+                    aip_evaluation = aip_client.prompt_agent(session_id, full_prompt)
+                except Exception as aip_err:
+                    logger.error(f"Palantir AIP pipeline failed: {aip_err}. Falling back gracefully to manual review.")
+                    aip_evaluation = (
+                        "⚠️ **Palantir AIP Orchestrator Evaluation Offline**\n"
+                        "An error occurred while evaluating this request with Palantir AIP. "
+                        "The request has been routed directly to the King's Court for manual search & approval.\n\n"
+                        f"*Error details:* `{str(aip_err)[:200]}`"
+                    )
+
             # 4. Save session metadata for later reference
             active_sessions[request_text] = {
                 "session_id": session_id,
@@ -105,7 +138,7 @@ async def on_message(message):
 
             # 5. Send notification to peasant that it has gone to the King's court
             await status_msg.edit(
-                content=f"📝 **Request Registered in Palantir AIP!**\n"
+                content=f"📝 **Request Registered Successfully!**\n"
                         f"👑 *Sent over to the High King's Court for approval. Please wait...*"
             )
 
@@ -122,7 +155,7 @@ async def on_message(message):
                         f"🛡️ 👑 **NEW MEDIA REQUEST SUBMITTED** 👑 🛡️\n"
                         f"👤 **Requester:** {message.author.mention}\n"
                         f"📋 **Request Title:** `{request_text}`\n\n"
-                        f"🔮 **Palantir AIP Orchestrator Assessment:**\n"
+                        f"🔮 **Orchestrator Assessment:**\n"
                         f"```markdown\n{aip_evaluation}\n```\n"
                         f"Sire, please evaluate this request below:"
                     )
