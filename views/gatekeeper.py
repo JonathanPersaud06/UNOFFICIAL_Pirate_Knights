@@ -1,5 +1,6 @@
 import discord
-from views.selector import TorrentDropdownView
+import asyncio
+from views.selector import TorrentDropdownView, fetch_prowlarr_results
 
 class InitialGatekeeperPanel(discord.ui.View):
     def __init__(self, request_content, requester, king_user_id, announcements_channel_id, aip_response=None):
@@ -16,9 +17,23 @@ class InitialGatekeeperPanel(discord.ui.View):
             await interaction.response.send_message("You have no power here, peasant! 🌾", ephemeral=True)
             return
 
-        await interaction.response.edit_message(
+        # Defer immediately so that Prowlarr queries can run without 3-second timeout issues
+        await interaction.response.defer()
+
+        # Execute synchronous fetch in a thread executor
+        prowlarr_results = await asyncio.to_thread(fetch_prowlarr_results, self.request_content)
+
+        view = TorrentDropdownView(
+            self.request_content, 
+            self.requester, 
+            self.king_user_id, 
+            self.announcements_channel_id,
+            prowlarr_results=prowlarr_results
+        )
+
+        await interaction.edit_original_response(
             content=f"👑 **Initial Approval Confirmed!**\nSire, select your preferred torrent source file for:\n> `{self.request_content}`",
-            view=TorrentDropdownView(self.request_content, self.requester, self.king_user_id, self.announcements_channel_id)
+            view=view
         )
 
     @discord.ui.button(label="No, Deny Request", style=discord.ButtonStyle.red, emoji="❌")

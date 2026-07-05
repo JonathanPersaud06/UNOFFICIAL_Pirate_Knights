@@ -129,6 +129,113 @@ def find_matching_radarr_movie(release_title: str, movies_list: list) -> dict:
                 return m
     return None
 
+def fetch_prowlarr_results(request_content: str) -> list:
+    """
+    Queries Prowlarr for search results based on the request content.
+    Returns a list of items from Prowlarr API.
+    """
+    prowlarr_url = os.getenv("PROWLARR_URL")
+    prowlarr_api_key = os.getenv("PROWLARR_API_KEY")
+    
+    if not prowlarr_url or not prowlarr_api_key:
+        return []
+        
+    # Determine search query keyword
+    search_query = request_content
+    scraped_title = None
+    
+    # Check if Nyaa.si view page to scrape title
+    nyaa_match = re.search(r"https?://(www\.)?nyaa\.si/view/(\d+)", request_content)
+    if nyaa_match:
+        nyaa_id = nyaa_match.group(2)
+        scraped_title = scrape_nyaa_title(nyaa_id)
+        
+    if request_content.startswith("http"):
+        if scraped_title:
+            search_query = scraped_title
+        elif "dn=" in request_content:
+            dn_match = re.search(r"dn=([^&]+)", request_content)
+            if dn_match:
+                import urllib.parse
+                search_query = urllib.parse.unquote(dn_match.group(1)).replace("+", " ")
+        else:
+            path_words = re.sub(r"https?://[^/]+", "", request_content)
+            path_words = re.sub(r"[^a-zA-Z0-9]+", " ", path_words).strip()
+            search_query = path_words
+            
+    if not search_query or len(search_query) <= 2:
+        return []
+        
+    logger.info(f"Querying Prowlarr for query: '{search_query}'")
+    base_url = prowlarr_url.strip().rstrip("/")
+    url = f"{base_url}/api/v1/search"
+    headers = {"X-Api-Key": prowlarr_api_key.strip()}
+    params = {"query": search_query}
+    try:
+        r = requests.get(url, headers=headers, params=params, timeout=10)
+        if r.status_code == 200:
+            results = r.json()
+            logger.info(f"Prowlarr returned {len(results)} results.")
+            return results
+        else:
+            logger.warning(f"Prowlarr search failed with code {r.status_code}")
+    except Exception as e:
+        logger.error(f"Prowlarr connection error: {e}")
+    return []
+
+def push_to_qbittorrent(download_url: str, category: str = "sonarr") -> dict:
+    """
+    Directly adds a magnet link or torrent URL to qBittorrent.
+    Uses the configured qBittorrent credentials in the .env file.
+    Returns a status dict.
+    """
+    qbit_url = os.getenv("QBITTORRENT_URL")
+    qbit_user = os.getenv("QBITTORRENT_USERNAME")
+    qbit_pass = os.getenv("QBITTORRENT_PASSWORD")
+    
+    if not qbit_url:
+        return {"status": "Not Configured", "error": "QBITTORRENT_URL is not set in .env."}
+        
+    base_url = qbit_url.strip().rstrip("/")
+    session = requests.Session()
+    
+    try:
+        # 1. Login
+        login_url = f"{base_url}/api/v2/auth/login"
+        payload = {
+            "username": qbit_user or "admin",
+            "password": qbit_pass or "adminadmin"
+        }
+        logger.info(f"Logging in to qBittorrent at {login_url}")
+        login_resp = session.post(login_url, data=payload, timeout=8)
+        if login_resp.status_code != 200 or "Ok" not in login_resp.text:
+            logger.warning(f"qBittorrent login failed: {login_resp.status_code} - {login_resp.text}")
+            return {"status": "Failed", "error": f"Login failed: {login_resp.text[:100]}"}
+            
+        # 2. Add torrent
+        add_url = f"{base_url}/api/v2/torrents/add"
+        
+        # Prepare multipart/form-data
+        files = {
+            "urls": (None, download_url),
+            "category": (None, category),
+            "paused": (None, "false")
+        }
+        
+        logger.info(f"Adding torrent to qBittorrent: {download_url[:60]}...")
+        add_resp = session.post(add_url, files=files, timeout=10)
+        
+        if add_resp.status_code == 200:
+            logger.info("Successfully pushed torrent directly to qBittorrent!")
+            return {"status": "Success ✅", "error": None}
+        else:
+            logger.warning(f"Failed to add torrent to qBittorrent: {add_resp.status_code} - {add_resp.text}")
+            return {"status": "Failed", "error": f"HTTP {add_resp.status_code}: {add_resp.text[:100]}"}
+            
+    except Exception as e:
+        logger.error(f"Error pushing to qBittorrent: {e}")
+        return {"status": "Error", "error": str(e)}
+
 def push_release(title: str, download_url: str) -> dict:
     """
     Pushes a torrent release to Sonarr and Radarr via their /api/v3/release/push endpoint.
@@ -144,6 +251,7 @@ def push_release(title: str, download_url: str) -> dict:
     radarr_api_key = os.getenv("RADARR_API_KEY")
     
     results = {}
+    is_sonarr_success = False
     
     # --- Sonarr Push ---
     if sonarr_url and sonarr_api_key:
@@ -155,8 +263,12 @@ def push_release(title: str, download_url: str) -> dict:
         pushed_title = title
         if matched_series:
             series_title = matched_series.get("title")
-            ep_info = extract_season_and_episode(title)
-            pushed_title = f"{series_title} - {ep_info}"
+            # Prepend the official series title if it doesn't already start with it to guarantee matching,
+            # while fully preserving the rest of the original title so Sonarr parses season, episode, and quality perfectly!
+            if not title.lower().startswith(series_title.lower()):
+                pushed_title = f"{series_title} - {title}"
+            else:
+                pushed_title = title
             logger.info(f"Pre-matched to Sonarr library: '{series_title}'. Normalizing push title to: '{pushed_title}'")
         else:
             logger.warning(f"Could not pre-match '{title}' in Sonarr library. Falling back to original title.")
@@ -186,19 +298,33 @@ def push_release(title: str, download_url: str) -> dict:
                         rejections = data.get("rejections", [])
                         if approved and not rejections:
                             results["sonarr"] = "Success (Grabbed/Approved) ✅"
+                            is_sonarr_success = True
                         else:
                             rej_msg = ", ".join(rejections) if rejections else "Rejected (e.g. series unmonitored or not in library)"
                             results["sonarr"] = f"Rejected ⚠️ ({rej_msg})"
                     else:
                         results["sonarr"] = "Success (200)"
+                        is_sonarr_success = True
                 except Exception as ex:
                     results["sonarr"] = f"Success ({r.status_code}) but response unparsed: {ex}"
+                    is_sonarr_success = True
             else:
                 results["sonarr"] = f"Failed ({r.status_code}): {r.text[:100]}"
         except Exception as e:
             results["sonarr"] = f"Error: {e}"
             logger.error(f"Error pushing to Sonarr: {e}")
             
+    # Fallback to direct qBittorrent push if Sonarr failed, rejected, or was not configured, and qBittorrent is set up
+    qbit_url = os.getenv("QBITTORRENT_URL")
+    if not is_sonarr_success and qbit_url:
+        logger.info("Sonarr release push was not successful/approved. Attempting direct fallback to qBittorrent...")
+        qbit_category = os.getenv("QBITTORRENT_CATEGORY", "sonarr").strip()
+        qbit_res = push_to_qbittorrent(download_url, category=qbit_category)
+        if "Success" in qbit_res.get("status", ""):
+            results["sonarr_fallback_qbit"] = "Success (Direct qBittorrent) 🚀"
+        else:
+            results["sonarr_fallback_qbit"] = f"Failed: {qbit_res.get('error', 'Unknown error')}"
+
     # --- Radarr Push ---
     if radarr_url and radarr_api_key:
         r_url = radarr_url.strip().rstrip("/")
@@ -283,7 +409,7 @@ def scrape_nyaa_title(nyaa_id: str) -> str:
     return f"Nyaa Torrent [ID: {nyaa_id}]"
 
 class TorrentDropdownView(discord.ui.View):
-    def __init__(self, request_content, requester, king_user_id, announcements_channel_id):
+    def __init__(self, request_content, requester, king_user_id, announcements_channel_id, prowlarr_results=None):
         super().__init__(timeout=None)
         self.request_content = request_content
         self.requester = requester
@@ -295,11 +421,11 @@ class TorrentDropdownView(discord.ui.View):
         free_gb = free // (2**30)
         
         # Pass the dynamic free_gb value into the dropdown item constructor
-        self.add_item(TorrentDropdown(request_content, requester, king_user_id, announcements_channel_id, free_gb))
+        self.add_item(TorrentDropdown(request_content, requester, king_user_id, announcements_channel_id, free_gb, prowlarr_results))
 
 
 class TorrentDropdown(discord.ui.Select):
-    def __init__(self, request_content, requester, king_user_id, announcements_channel_id, free_gb):
+    def __init__(self, request_content, requester, king_user_id, announcements_channel_id, free_gb, prowlarr_results=None):
         self.request_content = request_content
         self.requester = requester
         self.king_user_id = king_user_id
@@ -351,44 +477,10 @@ class TorrentDropdown(discord.ui.Select):
                 )
             )
 
-        # 2. Query Prowlarr for real search results
-        prowlarr_url = os.getenv("PROWLARR_URL")
-        prowlarr_api_key = os.getenv("PROWLARR_API_KEY")
-        
-        prowlarr_results = []
-        if prowlarr_url and prowlarr_api_key:
-            # Determine search query keyword
-            search_query = request_content
-            if request_content.startswith("http"):
-                if scraped_title:
-                    search_query = scraped_title
-                elif "dn=" in request_content:
-                    dn_match = re.search(r"dn=([^&]+)", request_content)
-                    if dn_match:
-                        import urllib.parse
-                        search_query = urllib.parse.unquote(dn_match.group(1)).replace("+", " ")
-                else:
-                    path_words = re.sub(r"https?://[^/]+", "", request_content)
-                    path_words = re.sub(r"[^a-zA-Z0-9]+", " ", path_words).strip()
-                    search_query = path_words
-            
-            if search_query and len(search_query) > 2:
-                logger.info(f"Querying Prowlarr for query: '{search_query}'")
-                base_url = prowlarr_url.strip().rstrip("/")
-                url = f"{base_url}/api/v1/search"
-                headers = {"X-Api-Key": prowlarr_api_key.strip()}
-                params = {"query": search_query}
-                try:
-                    r = requests.get(url, headers=headers, params=params, timeout=10)
-                    if r.status_code == 200:
-                        prowlarr_results = r.json()
-                        logger.info(f"Prowlarr returned {len(prowlarr_results)} results.")
-                    else:
-                        logger.warning(f"Prowlarr search failed with code {r.status_code}")
-                except Exception as e:
-                    logger.error(f"Prowlarr connection error: {e}")
+        # 2. Add Prowlarr search results to options (limit to avoid exceeding Discord limits)
+        if prowlarr_results is None:
+            prowlarr_results = []
 
-        # Add Prowlarr search results to options (limit to avoid exceeding Discord limits)
         for idx, item in enumerate(prowlarr_results):
             if len(options) >= 23: # max options inside a dropdown is 25 (reserve 1 for abort)
                 break
@@ -506,7 +598,8 @@ class TorrentDropdown(discord.ui.Select):
             # Build pretty status block
             status_parts = []
             for service, status in push_statuses.items():
-                status_parts.append(f"• **{service.capitalize()}:** {status}")
+                service_name = "qBittorrent Fallback" if service == "sonarr_fallback_qbit" else service.capitalize()
+                status_parts.append(f"• **{service_name}:** {status}")
             status_text = "\n".join(status_parts) if status_parts else "• *No Servarr endpoints configured.*"
 
             await announcements_channel.send(
