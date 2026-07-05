@@ -199,6 +199,12 @@ def push_to_qbittorrent(download_url: str, category: str = "sonarr") -> dict:
     base_url = qbit_url.strip().rstrip("/")
     session = requests.Session()
     
+    # Custom headers, especially 'Referer', are essential to bypass qBittorrent Host/CSRF protections
+    headers = {
+        "Referer": f"{base_url}/",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    
     try:
         # 1. Login
         login_url = f"{base_url}/api/v2/auth/login"
@@ -207,11 +213,15 @@ def push_to_qbittorrent(download_url: str, category: str = "sonarr") -> dict:
             "password": qbit_pass or "adminadmin"
         }
         logger.info(f"Logging in to qBittorrent at {login_url}")
-        login_resp = session.post(login_url, data=payload, timeout=8)
-        if login_resp.status_code != 200 or "Ok" not in login_resp.text:
+        login_resp = session.post(login_url, data=payload, headers=headers, timeout=8)
+        
+        # qBittorrent may return 200 with 'Ok.' or 204 No Content for a successful login
+        if login_resp.status_code not in (200, 204):
             logger.warning(f"qBittorrent login failed: {login_resp.status_code} - {login_resp.text}")
-            return {"status": "Failed", "error": f"Login failed: {login_resp.text[:100]}"}
+            return {"status": "Failed", "error": f"Login failed with status {login_resp.status_code}: {login_resp.text[:100]}"}
             
+        logger.info("Successfully authenticated with qBittorrent (status code: %d)", login_resp.status_code)
+        
         # 2. Add torrent
         add_url = f"{base_url}/api/v2/torrents/add"
         
@@ -223,7 +233,7 @@ def push_to_qbittorrent(download_url: str, category: str = "sonarr") -> dict:
         }
         
         logger.info(f"Adding torrent to qBittorrent: {download_url[:60]}...")
-        add_resp = session.post(add_url, files=files, timeout=10)
+        add_resp = session.post(add_url, files=files, headers=headers, timeout=10)
         
         if add_resp.status_code == 200:
             logger.info("Successfully pushed torrent directly to qBittorrent!")
