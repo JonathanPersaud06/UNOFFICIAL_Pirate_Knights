@@ -1,5 +1,4 @@
 # UNOFFICIAL_Pirate_Knights
-DONT SUE ME CARTWRIGHT YOU SON OF A BITCH
 # Pirate Knights: Torrent Request Bot
 
 Welcome to the team! This repository is dedicated to building out the torrent request functionality for our Discord bot.
